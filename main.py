@@ -3,6 +3,7 @@ import asyncio
 import random
 import os
 import time
+import tempfile
 import requests
 import psutil
 from datetime import datetime
@@ -16,6 +17,13 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.error import BadRequest, TelegramError, Forbidden
+
+try:
+    from nudenet import NudeDetector
+    _nsfw_detector = NudeDetector()
+except Exception as _e:
+    print(f"⚠️ NudeNet failed to load, NSFW scan disabled: {_e}")
+    _nsfw_detector = None
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8684382287:AAE17nfdgrbndBSl1wG9MWmiW9GdeErkTg4")
 REMOVE_BG_API = "f3Se7SVDqpvsM5TLknPKN6Cz"
@@ -154,6 +162,118 @@ async def safe_edit(message, text):
         pass
     except TelegramError:
         pass
+
+
+# ──────── Processing animation (0% → 100%) ────────
+PROGRESS_STEPS = [
+    ("🚀 ɪɴɪᴛɪᴀʟɪᴢɪɴɢ ᴇɴɢɪɴᴇ",      6),
+    ("🔍 sᴄᴀɴɴɪɴɢ ᴘɪxᴇʟs",         18),
+    ("🧠 ᴀɪ ᴀɴᴀʟʏᴢɪɴɢ ɪᴍᴀɢᴇ",     32),
+    ("⚙️ ᴄᴏᴍᴘᴜᴛɪɴɢ ᴍᴀsᴋ",          48),
+    ("✨ ᴡᴏʀᴋɪɴɢ ᴍᴀɢɪᴄ",            64),
+    ("🎨 ʀᴇɴᴅᴇʀɪɴɢ ʟᴀʏᴇʀs",        78),
+    ("🌟 ᴘᴏʟɪsʜɪɴɢ ʀᴇsᴜʟᴛ",         90),
+    ("⚡ ғɪɴᴀʟɪᴢɪɴɢ",                97),
+]
+SPIN = ["◐", "◓", "◑", "◒"]
+
+
+def progress_card(label: str, pct: int, spin_i: int) -> str:
+    filled = pct // 10
+    empty = 10 - filled
+    bar = "▰" * filled + "▱" * empty
+    spinner = SPIN[spin_i % len(SPIN)]
+    return (
+        f"╭─〘 {spinner} <b>ᴘʀᴏᴄᴇssɪɴɢ ᴍᴀɢɪᴄ</b> {spinner} 〙─╮\n"
+        f"│\n"
+        f"│  <code>[{bar}]</code>\n"
+        f"│  <b>{pct:3d}%</b>  ·  {label}\n"
+        f"│\n"
+        f"╰──〘 ᴍᴀᴅᴀʀᴀ ʙɢ ᴇɴɢɪɴᴇ 〙──╯"
+    )
+
+
+async def progress_anim(message, stop_event: asyncio.Event):
+    """Loop through frames updating message until stop_event is set, then snap to 100%."""
+    spin_i = 0
+    i = 0
+    while not stop_event.is_set() and i < len(PROGRESS_STEPS):
+        label, pct = PROGRESS_STEPS[i]
+        await safe_edit(message, progress_card(label, pct, spin_i))
+        spin_i += 1
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.45)
+        except asyncio.TimeoutError:
+            pass
+        i += 1
+    # Loop the last "almost done" step if API is still slow
+    while not stop_event.is_set():
+        label, pct = PROGRESS_STEPS[-1]
+        await safe_edit(message, progress_card(label, pct, spin_i))
+        spin_i += 1
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.45)
+        except asyncio.TimeoutError:
+            pass
+    # Final 100% frame
+    await safe_edit(message, progress_card("✅ ᴄᴏᴍᴘʟᴇᴛᴇ", 100, spin_i))
+    await asyncio.sleep(0.35)
+
+
+async def run_with_progress(processing_msg, work_coro):
+    """Run an awaitable while showing animated progress bar."""
+    stop = asyncio.Event()
+    anim_task = asyncio.create_task(progress_anim(processing_msg, stop))
+    try:
+        result = await work_coro
+        return result
+    finally:
+        stop.set()
+        try:
+            await anim_task
+        except Exception:
+            pass
+
+
+# ──────── NSFW / unsafe-content scanner ────────
+NSFW_LABELS = {
+    "FEMALE_BREAST_EXPOSED",
+    "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+    "ANUS_EXPOSED",
+}
+NSFW_THRESHOLD = 0.55
+WARNING_LIMIT = 3  # third strike → ban
+
+
+def _scan_image_sync(image_bytes: bytes):
+    """Returns (is_unsafe, reason). Runs synchronously in a thread."""
+    if _nsfw_detector is None:
+        return False, ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(image_bytes)
+            tmp_path = tmp.name
+        try:
+            results = _nsfw_detector.detect(tmp_path) or []
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        for r in results:
+            cls = r.get("class") or r.get("label") or ""
+            score = r.get("score", 0)
+            if cls in NSFW_LABELS and score >= NSFW_THRESHOLD:
+                return True, f"{cls} ({score:.2f})"
+    except Exception as e:
+        print(f"⚠️ NSFW scan error: {e}")
+    return False, ""
+
+
+async def scan_image(image_bytes: bytes):
+    return await asyncio.to_thread(_scan_image_sync, image_bytes)
 
 
 # ──────── Source-code button helper ────────
@@ -325,7 +445,10 @@ def help_text() -> str:
         "🔧 /setgroup — ᴀᴜᴛʜᴏʀɪᴢᴇ ᴄᴜʀʀᴇɴᴛ ɢʀᴏᴜᴘ\n"
         "🚫 /ban &lt;ɪᴅ&gt; — ʙᴀɴ ᴜsᴇʀ\n"
         "✅ /unban &lt;ɪᴅ&gt; — ʟɪғᴛ ʙᴀɴ\n"
-        "📋 /banned — sᴇᴇ ʙᴀɴɴᴇᴅ ʟɪsᴛ\n\n"
+        "📋 /banned — sᴇᴇ ʙᴀɴɴᴇᴅ ʟɪsᴛ\n"
+        "⚠️ /warnings — sᴇᴇ ɴsғᴡ sᴛʀɪᴋᴇs\n"
+        "♻️ /resetwarn &lt;ɪᴅ&gt; — ᴄʟᴇᴀʀ sᴛʀɪᴋᴇs\n\n"
+        "🛡 <i>ᴀʟʟ ᴜᴘʟᴏᴀᴅs ᴀʀᴇ sᴄᴀɴɴᴇᴅ ғᴏʀ ɴsғᴡ ᴄᴏɴᴛᴇɴᴛ. 3 sᴛʀɪᴋᴇs = ᴀᴜᴛᴏ-ʙᴀɴ.</i>\n"
         "⏳ <i>ᴀʟʟ ʙᴏᴛ ᴍᴇssᴀɢᴇs ᴀᴜᴛᴏ-ᴅᴇʟᴇᴛᴇ ᴀғᴛᴇʀ 1 ᴍɪɴᴜᴛᴇ.</i>"
     )
 
@@ -435,26 +558,112 @@ async def handle_photo(update, context):
         ᴜɴʟɪᴍɪᴛᴇᴅ=("ʏᴇs" if unlimited else "ɴᴏ"),
     )
 
+    # Show animated processing card before any API work
+    processing = await update.message.reply_text(
+        progress_card("🚀 ɪɴɪᴛɪᴀʟɪᴢɪɴɢ ᴇɴɢɪɴᴇ", 0, 0),
+        parse_mode="HTML",
+    )
+
+    # ─── Safety scan: NSFW content moderation ───
+    # Owner is exempt (so you can still test the bot freely).
+    if not is_owner(uid):
+        try:
+            await safe_edit(
+                processing,
+                progress_card("🛡 sᴀғᴇᴛʏ sᴄᴀɴ", 10, 0),
+            )
+            img_bytes_for_scan = await asyncio.to_thread(
+                lambda: requests.get(img_url, timeout=30).content
+            )
+            unsafe, reason = await scan_image(img_bytes_for_scan)
+        except Exception:
+            unsafe, reason = False, ""
+
+        if unsafe:
+            # Refund any credit deduction (we haven't deducted yet, but be safe later)
+            users[uid]["warnings"] = users[uid].get("warnings", 0) + 1
+            warns = users[uid]["warnings"]
+            save()
+
+            try:
+                await processing.delete()
+            except Exception:
+                pass
+
+            await notify_owner(
+                context,
+                f"🚨 ᴜɴsᴀғᴇ ɪᴍᴀɢᴇ ᴅᴇᴛᴇᴄᴛᴇᴅ (sᴛʀɪᴋᴇ {warns}/{WARNING_LIMIT})",
+                update.effective_user, chat,
+                ʀᴇᴀsᴏɴ=reason or "ɴsғᴡ",
+            )
+
+            if warns >= WARNING_LIMIT:
+                banned.add(int(uid))
+                save_config()
+                msg = (
+                    "⛔ <b>ʏᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ʙᴀɴɴᴇᴅ</b>\n\n"
+                    f"🚨 sᴛʀɪᴋᴇ <b>{warns}/{WARNING_LIMIT}</b> — ʀᴇᴘᴇᴀᴛᴇᴅ ɴsғᴡ ᴄᴏɴᴛᴇɴᴛ.\n"
+                    "ʏᴏᴜ ᴄᴀɴ ɴᴏ ʟᴏɴɢᴇʀ ᴜsᴇ ᴛʜɪs ʙᴏᴛ.\n\n"
+                    "ɪғ ʏᴏᴜ ʙᴇʟɪᴇᴠᴇ ᴛʜɪs ɪs ᴀ ᴍɪsᴛᴀᴋᴇ, "
+                    "ᴄᴏɴᴛᴀᴄᴛ ᴛʜᴇ ᴏᴡɴᴇʀ."
+                )
+            elif warns == 1:
+                msg = (
+                    "⚠️ <b>ᴡᴀʀɴɪɴɢ 1 ᴏғ 3</b>\n\n"
+                    "🚫 ʏᴏᴜʀ ɪᴍᴀɢᴇ ᴡᴀs ғʟᴀɢɢᴇᴅ ᴀs <b>ɴsғᴡ / ᴜɴsᴀғᴇ</b> ᴀɴᴅ ᴡᴀs ʀᴇᴊᴇᴄᴛᴇᴅ.\n\n"
+                    "ᴘʟᴇᴀsᴇ ᴅᴏ ɴᴏᴛ sᴇɴᴅ ᴘᴏʀɴᴏɢʀᴀᴘʜɪᴄ, ᴅʀᴜɢ-ʀᴇʟᴀᴛᴇᴅ, ᴏʀ ᴀɴʏ ᴜɴsᴀғᴇ ᴄᴏɴᴛᴇɴᴛ.\n"
+                    "ʀᴇᴘᴇᴀᴛ ᴏғғᴇɴᴄᴇs ᴡɪʟʟ ʀᴇsᴜʟᴛ ɪɴ ᴀ ᴘᴇʀᴍᴀɴᴇɴᴛ ʙᴀɴ."
+                )
+            else:  # warns == 2
+                msg = (
+                    "⚠️ <b>ғɪɴᴀʟ ᴡᴀʀɴɪɴɢ — 2 ᴏғ 3</b>\n\n"
+                    "🚫 ʏᴏᴜʀ ɪᴍᴀɢᴇ ᴡᴀs ғʟᴀɢɢᴇᴅ ᴀs <b>ɴsғᴡ / ᴜɴsᴀғᴇ</b> ᴀɢᴀɪɴ.\n\n"
+                    "<b>ᴏɴᴇ ᴍᴏʀᴇ ᴏғғᴇɴᴄᴇ ᴀɴᴅ ʏᴏᴜ ᴡɪʟʟ ʙᴇ ʙᴀɴɴᴇᴅ ғʀᴏᴍ ᴛʜᴇ ʙᴏᴛ.</b>"
+                )
+
+            sent = await update.message.reply_text(
+                msg, parse_mode="HTML", reply_markup=source_keyboard()
+            )
+            schedule_delete(sent)
+            return
+
     # UPLOAD MODE
     if user_mode == "upload":
         if not unlimited:
             users[uid]["credits"] -= 1
             save()
-        try:
-            img_bytes = requests.get(img_url, timeout=30).content
-            res = requests.post(
-                "https://api.imgbb.com/1/upload",
-                params={"key": IMGBB_API},
-                files={"image": img_bytes},
-                timeout=30,
+
+        async def upload_work():
+            img_bytes = await asyncio.to_thread(
+                lambda: requests.get(img_url, timeout=30).content
             )
-            data = res.json()
+            res = await asyncio.to_thread(
+                lambda: requests.post(
+                    "https://api.imgbb.com/1/upload",
+                    params={"key": IMGBB_API},
+                    files={"image": img_bytes},
+                    timeout=30,
+                )
+            )
+            return res.json()
+
+        try:
+            data = await run_with_progress(processing, upload_work())
         except Exception:
+            try:
+                await processing.delete()
+            except Exception:
+                pass
             sent = await update.message.reply_text(
                 "❌ ᴜᴘʟᴏᴀᴅ ғᴀɪʟᴇᴅ", reply_markup=source_keyboard()
             )
             schedule_delete(sent)
             return
+
+        try:
+            await processing.delete()
+        except Exception:
+            pass
 
         if not data.get("success"):
             sent = await update.message.reply_text(
@@ -476,19 +685,34 @@ async def handle_photo(update, context):
     if not unlimited:
         users[uid]["credits"] -= 1
         save()
-    try:
-        res = requests.post(
-            "https://api.remove.bg/v1.0/removebg",
-            data={"image_url": img_url},
-            headers={"X-Api-Key": REMOVE_BG_API},
-            timeout=60,
+
+    async def remove_work():
+        return await asyncio.to_thread(
+            lambda: requests.post(
+                "https://api.remove.bg/v1.0/removebg",
+                data={"image_url": img_url},
+                headers={"X-Api-Key": REMOVE_BG_API},
+                timeout=60,
+            )
         )
+
+    try:
+        res = await run_with_progress(processing, remove_work())
     except Exception:
+        try:
+            await processing.delete()
+        except Exception:
+            pass
         sent = await update.message.reply_text(
             "❌ ʙɢ ʀᴇᴍᴏᴠᴇ ғᴀɪʟᴇᴅ", reply_markup=source_keyboard()
         )
         schedule_delete(sent)
         return
+
+    try:
+        await processing.delete()
+    except Exception:
+        pass
 
     if res.status_code != 200:
         sent = await update.message.reply_text(
@@ -497,7 +721,13 @@ async def handle_photo(update, context):
         schedule_delete(sent)
         return
 
-    sent = await update.message.reply_photo(res.content, reply_markup=source_keyboard())
+    sent = await update.message.reply_photo(
+        res.content,
+        has_spoiler=True,
+        caption="✨ <b>ʏᴏᴜʀ ʙᴀᴄᴋɢʀᴏᴜɴᴅ-ʀᴇᴍᴏᴠᴇᴅ ɪᴍᴀɢᴇ</b> 🥀\n<i>ᴛᴀᴘ ᴛᴏ ʀᴇᴠᴇᴀʟ</i>",
+        parse_mode="HTML",
+        reply_markup=source_keyboard(),
+    )
     schedule_delete(sent)
 
 
@@ -754,6 +984,51 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     schedule_delete(sent)
 
 
+async def warnings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent)
+        return
+
+    rows = []
+    for u, info in users.items():
+        w = info.get("warnings", 0)
+        if w > 0:
+            rows.append(f"• <code>{u}</code> — <b>{w}/{WARNING_LIMIT}</b>")
+    if not rows:
+        text = "📋 <b>ᴡᴀʀɴɪɴɢs ʟɪsᴛ</b>\n\nɴᴏ ᴜsᴇʀs ʜᴀᴠᴇ ᴡᴀʀɴɪɴɢs. ✨"
+    else:
+        text = f"📋 <b>ᴡᴀʀɴɪɴɢs ʟɪsᴛ</b> ({len(rows)})\n\n" + "\n".join(rows)
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=source_keyboard())
+    schedule_delete(sent)
+
+
+async def resetwarn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent)
+        return
+
+    target = _parse_target_id(update, context)
+    if target is None:
+        sent = await update.message.reply_text(
+            "♻️ <b>ᴜsᴀɢᴇ:</b>\n/resetwarn &lt;ᴜsᴇʀ_ɪᴅ&gt;\nᴏʀ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴜsᴇʀ ᴡɪᴛʜ /resetwarn",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent)
+        return
+
+    uid_str = str(int(target))
+    if uid_str in users:
+        users[uid_str]["warnings"] = 0
+        save()
+    sent = await update.message.reply_text(
+        f"♻️ <b>ʀᴇsᴇᴛ ᴡᴀʀɴɪɴɢs</b> ғᴏʀ <code>{target}</code>",
+        parse_mode="HTML",
+    )
+    schedule_delete(sent)
+
+
 async def banned_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
@@ -783,6 +1058,8 @@ app.add_handler(CommandHandler("setgroup", setgroup))
 app.add_handler(CommandHandler("ban", ban))
 app.add_handler(CommandHandler("unban", unban))
 app.add_handler(CommandHandler("banned", banned_list))
+app.add_handler(CommandHandler("warnings", warnings_cmd))
+app.add_handler(CommandHandler("resetwarn", resetwarn_cmd))
 app.add_handler(CallbackQueryHandler(ref, pattern="^ref$"))
 app.add_handler(CallbackQueryHandler(help_cb, pattern="^help$"))
 app.add_handler(CallbackQueryHandler(set_mode, pattern="^(remove|upload)$"))
