@@ -830,3 +830,930 @@ async def handle_photo(update, context):
             sent = await update.message.reply_text(msg, parse_mode="HTML", reply_markup=source_keyboard())
             schedule_delete(sent)
             return
+
+
+    # UPLOAD MODE
+    if user_mode == "upload":
+        if not unlimited:
+            state.users[uid]["credits"] -= 1
+            state.persist()
+
+        async def upload_work():
+            img_bytes = await asyncio.to_thread(
+                lambda: requests.get(img_url, timeout=30).content
+            )
+            res = await asyncio.to_thread(
+                lambda: requests.post(
+                    "https://api.imgbb.com/1/upload",
+                    params={"key": state.imgbb_api},
+                    files={"image": img_bytes},
+                    timeout=30,
+                )
+            )
+            return res.json()
+
+        try:
+            data = await run_with_progress(processing, upload_work())
+        except Exception:
+            try:
+                await processing.delete()
+            except Exception:
+                pass
+            sent = await update.message.reply_text("❌ ᴜᴘʟᴏᴀᴅ ғᴀɪʟᴇᴅ", reply_markup=source_keyboard())
+            schedule_delete(sent)
+            return
+
+        try:
+            await processing.delete()
+        except Exception:
+            pass
+
+        if not data.get("success"):
+            sent = await update.message.reply_text("❌ ᴜᴘʟᴏᴀᴅ ғᴀɪʟᴇᴅ", reply_markup=source_keyboard())
+            schedule_delete(sent)
+            return
+
+        state.uploads += 1
+        state.persist()
+
+        sent = await update.message.reply_text(
+            f"🌐✨ <b>ʏᴏᴜʀ ɪᴍᴀɢᴇ ʟɪɴᴋ:</b>\n{data['data']['url']}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=source_keyboard(),
+        )
+        schedule_delete(sent)
+        return
+
+    # REMOVE BACKGROUND
+    if not unlimited:
+        state.users[uid]["credits"] -= 1
+        state.persist()
+
+    async def remove_work():
+        return await asyncio.to_thread(
+            lambda: requests.post(
+                "https://api.remove.bg/v1.0/removebg",
+                data={"image_url": img_url},
+                headers={"X-Api-Key": state.remove_bg_api},
+                timeout=60,
+            )
+        )
+
+    try:
+        res = await run_with_progress(processing, remove_work())
+    except Exception:
+        try:
+            await processing.delete()
+        except Exception:
+            pass
+        sent = await update.message.reply_text("❌ ʙɢ ʀᴇᴍᴏᴠᴇ ғᴀɪʟᴇᴅ", reply_markup=source_keyboard())
+        schedule_delete(sent)
+        return
+
+    try:
+        await processing.delete()
+    except Exception:
+        pass
+
+    if res.status_code != 200:
+        sent = await update.message.reply_text("❌ ʙɢ ʀᴇᴍᴏᴠᴇ ғᴀɪʟᴇᴅ", reply_markup=source_keyboard())
+        schedule_delete(sent)
+        return
+
+    state.removals += 1
+    state.persist()
+
+    sent = await update.message.reply_photo(
+        res.content,
+        has_spoiler=True,
+        caption="✨ <b>ʏᴏᴜʀ ʙᴀᴄᴋɢʀᴏᴜɴᴅ-ʀᴇᴍᴏᴠᴇᴅ ɪᴍᴀɢᴇ</b> 🥀\n<i>ᴛᴀᴘ ᴛᴏ ʀᴇᴠᴇᴀʟ</i>",
+        parse_mode="HTML",
+        reply_markup=source_keyboard(),
+    )
+    schedule_delete(sent)
+
+
+# ──────── /ping ────────
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await gate(update, context):
+        return
+    state = state_of(context)
+    t0 = time.time()
+    pinging = await update.message.reply_text("🏓 ᴘɪɴɢɪɴɢ...")
+    ping_ms = (time.time() - t0) * 1000
+
+    try:
+        cpu = psutil.cpu_percent(interval=0.4)
+        ram = psutil.virtual_memory().percent
+        disk = psutil.disk_usage("/").percent
+    except Exception:
+        cpu = ram = disk = 0.0
+
+    await notify_owner(
+        context, "ᴜsᴇᴅ /ᴘɪɴɢ",
+        update.effective_user, update.effective_chat,
+        ʟᴀᴛᴇɴᴄʏ=f"{ping_ms:.2f}ᴍs",
+    )
+
+    if state.ping_text:
+        try:
+            caption = state.ping_text.format(
+                ping=f"{ping_ms:.3f}",
+                uptime=format_uptime(),
+                ram=ram, cpu=cpu, disk=disk,
+                bot=context.bot.first_name or "ʙᴏᴛ",
+            )
+        except Exception:
+            caption = state.ping_text
+    else:
+        caption = (
+            "<b>sᴛᴧʀᴛed!</b>\n\n"
+            f"🏓 <b>ᴘɪɴɢ..ᴩᴏɴɢ</b> : {ping_ms:.3f}\n"
+            "🌺 <b>sʏsᴛᴇᴍ sᴛᴀᴛs</b> :\n\n"
+            f":⧽ ᴜᴩᴛɪᴍᴇ : {format_uptime()}\n"
+            f":⧽ ʀᴀᴍ : {ram}%\n"
+            f":⧽ ᴄᴩᴜ : {cpu}%\n"
+            f":⧽ ᴅɪsᴋ : {disk}%\n"
+            f":⧽ ᴩʏ-ᴛɢᴄᴀʟʟs : 0.436ᴍs\n"
+            f':⧽ ʙʏ » <a href="{state.master_link}">|𝐌 ᴀ ᴅ ᴀ ʀ ᴀ •|</a>'
+        )
+
+    try:
+        await pinging.delete()
+    except (BadRequest, TelegramError):
+        pass
+
+    try:
+        sent = await update.message.reply_video(
+            video=PING_VIDEO,
+            caption=caption,
+            parse_mode="HTML",
+            has_spoiler=True,
+            reply_markup=source_keyboard(),
+        )
+    except (BadRequest, TelegramError):
+        try:
+            sent = await update.message.reply_text(
+                caption, parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=source_keyboard(),
+            )
+        except (BadRequest, TelegramError):
+            sent = await update.message.reply_text(
+                caption, disable_web_page_preview=True, reply_markup=source_keyboard(),
+            )
+
+    schedule_delete(sent)
+
+
+# ──────── /broadcast ────────
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await gate(update, context):
+        return
+    state = state_of(context)
+    uid = update.effective_user.id
+    if not state.is_owner(uid):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent)
+        return
+
+    targets = list(state.users.keys())
+    reply = update.message.reply_to_message
+    text_arg = (update.message.text or "").partition(" ")[2].strip()
+
+    if reply is None and not text_arg:
+        sent = await update.message.reply_text(
+            "📢 <b>ᴜsᴀɢᴇ:</b>\n"
+            "/broadcast &lt;ᴍᴇssᴀɢᴇ&gt;\n"
+            "ᴏʀ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴍᴇssᴀɢᴇ ᴡɪᴛʜ /broadcast",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent)
+        return
+
+    if not targets and not (state.is_main and int(uid) == MASTER_OWNER_ID and CLONE_APPS):
+        sent = await update.message.reply_text("📭 ɴᴏ ᴜsᴇʀs ᴛᴏ ʙʀᴏᴀᴅᴄᴀsᴛ ᴛᴏ.")
+        schedule_delete(sent)
+        return
+
+    status = await update.message.reply_text(
+        f"📢 <b>ʙʀᴏᴀᴅᴄᴀsᴛɪɴɢ ᴛᴏ {len(targets)} ᴜsᴇʀs...</b>",
+        parse_mode="HTML",
+    )
+
+    success, fail, blocked = 0, 0, 0
+    for target_uid in targets:
+        try:
+            target_int = int(target_uid)
+            if reply is not None:
+                await context.bot.copy_message(
+                    chat_id=target_int,
+                    from_chat_id=reply.chat_id,
+                    message_id=reply.message_id,
+                )
+            else:
+                await context.bot.send_message(chat_id=target_int, text=text_arg)
+            success += 1
+        except Forbidden:
+            blocked += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    # Cross-broadcast: the SUPREME MASTER on the MAIN bot fans the message
+    # out to every clone's user base (text-only cross-bot for safety).
+    clone_total = 0
+    clone_sent = 0
+    clone_count = 0
+    if state.is_main and int(uid) == MASTER_OWNER_ID and CLONE_APPS:
+        cross_text = text_arg
+        if not cross_text and reply is not None:
+            cross_text = reply.text or reply.caption or ""
+        if cross_text:
+            for tk, capp in list(CLONE_APPS.items()):
+                cs = CLONE_STATES.get(tk)
+                if not cs:
+                    continue
+                clone_count += 1
+                for cuid in list(cs.users.keys()):
+                    clone_total += 1
+                    try:
+                        await capp.bot.send_message(int(cuid), cross_text)
+                        clone_sent += 1
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.04)
+
+    summary = (
+        "📢 <b>ʙʀᴏᴀᴅᴄᴀsᴛ ᴄᴏᴍᴘʟᴇᴛᴇ</b>\n"
+        f"✅ sᴇɴᴛ: {success}\n"
+        f"🚫 ʙʟᴏᴄᴋᴇᴅ: {blocked}\n"
+        f"❌ ғᴀɪʟᴇᴅ: {fail}"
+    )
+    if clone_count:
+        summary += (
+            f"\n\n🌐 <b>ᴄʟᴏɴᴇ ɴᴇᴛᴡᴏʀᴋ</b>\n"
+            f"🤖 ᴄʟᴏɴᴇs ʀᴇᴀᴄʜᴇᴅ: {clone_count}\n"
+            f"✅ ᴜsᴇʀs sᴇɴᴛ: {clone_sent}/{clone_total}"
+        )
+
+    try:
+        await status.edit_text(summary, parse_mode="HTML")
+    except (BadRequest, TelegramError):
+        pass
+    schedule_delete(status)
+
+
+# ──────── /stats ────────
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await gate(update, context):
+        return
+    state = state_of(context)
+    uid = update.effective_user.id
+    if not state.is_owner(uid):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent)
+        return
+
+    total = len(state.users)
+    total_credits = sum(u.get("credits", 0) for u in state.users.values())
+    total_refs = sum(len(u.get("refs", [])) for u in state.users.values())
+
+    text = (
+        f"📊 <b>{'ᴍᴀɪɴ' if state.is_main else 'ᴄʟᴏɴᴇ'} sᴛᴀᴛɪsᴛɪᴄs</b>\n\n"
+        f"🤖 ʙᴏᴛ : @{state.bot_username or '—'}\n"
+        f"👥 ᴜsᴇʀs : {total}\n"
+        f"💰 ᴄʀᴇᴅɪᴛs ɪɴ ᴄɪʀᴄᴜʟᴀᴛɪᴏɴ : {total_credits}\n"
+        f"🔗 ᴛᴏᴛᴀʟ ʀᴇғᴇʀʀᴀʟs : {total_refs}\n"
+        f"🧠 ʙɢ ʀᴇᴍᴏᴠᴀʟs : {state.removals}\n"
+        f"📤 ɪᴍᴀɢᴇ ᴜᴘʟᴏᴀᴅs : {state.uploads}\n"
+        f"⏳ ᴜᴘᴛɪᴍᴇ : {format_uptime()}\n"
+        f"🏷 ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ɢʀᴏᴜᴘ : <code>{state.allowed_group_id or 'ɴᴏᴛ ѕᴇᴛ'}</code>\n"
+        f"🚫 ʙᴀɴɴᴇᴅ : {len(state.banned)}"
+    )
+    if state.is_main:
+        text += f"\n🌐 ᴄʟᴏɴᴇs ᴀᴄᴛɪᴠᴇ : {len(CLONE_APPS)}"
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=source_keyboard())
+    schedule_delete(sent)
+
+
+# ──────── /setgroup ────────
+async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = state_of(context)
+    uid = update.effective_user.id
+    if not state.is_owner(uid):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent)
+        return
+
+    chat = update.effective_chat
+    if chat.type == "private":
+        sent = await update.message.reply_text(
+            f"ℹ️ ʀᴜɴ /setgroup ɪɴsɪᴅᴇ ᴛʜᴇ ɢʀᴏᴜᴘ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ᴀᴜᴛʜᴏʀɪᴢᴇ.\n"
+            f"ɢʀᴏᴜᴘ ʟɪɴᴋ: {state.join_url}",
+            disable_web_page_preview=True,
+        )
+        schedule_delete(sent)
+        return
+
+    state.allowed_group_id = chat.id
+    state.persist()
+
+    sent = await update.message.reply_text(
+        f"✅ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ɢʀᴏᴜᴘ sᴇᴛ ᴛᴏ <b>{chat.title}</b>\n"
+        f"🆔 <code>{chat.id}</code>\n"
+        "🌟 ᴀʟʟ ᴍᴇᴍʙᴇʀs ʜᴇʀᴇ ɴᴏᴡ ɢᴇᴛ ᴜɴʟɪᴍɪᴛᴇᴅ ᴜsᴀɢᴇ.",
+        parse_mode="HTML",
+    )
+    schedule_delete(sent)
+
+
+# ──────── ban / unban / banned / warnings / resetwarn ────────
+def _parse_target_id(update, context):
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        return update.message.reply_to_message.from_user.id
+    if context.args:
+        try:
+            return int(context.args[0])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+async def ban(update, context):
+    state = state_of(context)
+    if not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent); return
+
+    target = _parse_target_id(update, context)
+    if target is None:
+        sent = await update.message.reply_text(
+            "🚫 <b>ᴜsᴀɢᴇ:</b>\n/ban &lt;ᴜsᴇʀ_ɪᴅ&gt;\nᴏʀ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴜsᴇʀ ᴡɪᴛʜ /ban",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent); return
+    if int(target) == state.owner_id or int(target) == MASTER_OWNER_ID:
+        sent = await update.message.reply_text("🙃 ᴄᴀɴ'ᴛ ʙᴀɴ ᴛʜᴇ ᴏᴡɴᴇʀ.")
+        schedule_delete(sent); return
+
+    state.banned.add(int(target))
+    state.persist()
+    sent = await update.message.reply_text(
+        f"🚫 <b>ʙᴀɴɴᴇᴅ</b> <code>{target}</code>\nᴛʜᴇʏ ᴄᴀɴ ɴᴏ ʟᴏɴɢᴇʀ ᴜsᴇ ᴛʜᴇ ʙᴏᴛ.",
+        parse_mode="HTML",
+    )
+    schedule_delete(sent)
+
+
+async def unban(update, context):
+    state = state_of(context)
+    if not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent); return
+
+    target = _parse_target_id(update, context)
+    if target is None:
+        sent = await update.message.reply_text(
+            "✅ <b>ᴜsᴀɢᴇ:</b>\n/unban &lt;ᴜsᴇʀ_ɪᴅ&gt;\nᴏʀ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴜsᴇʀ ᴡɪᴛʜ /unban",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent); return
+
+    if int(target) not in state.banned:
+        sent = await update.message.reply_text(
+            f"ℹ️ <code>{target}</code> ɪs ɴᴏᴛ ʙᴀɴɴᴇᴅ.", parse_mode="HTML"
+        )
+        schedule_delete(sent); return
+
+    state.banned.discard(int(target))
+    state.persist()
+    sent = await update.message.reply_text(
+        f"✅ <b>ᴜɴʙᴀɴɴᴇᴅ</b> <code>{target}</code>", parse_mode="HTML"
+    )
+    schedule_delete(sent)
+
+
+async def warnings_cmd(update, context):
+    state = state_of(context)
+    if not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent); return
+
+    rows = []
+    for u, info in state.users.items():
+        w = info.get("warnings", 0)
+        if w > 0:
+            rows.append(f"• <code>{u}</code> — <b>{w}/{WARNING_LIMIT}</b>")
+    if not rows:
+        text = "📋 <b>ᴡᴀʀɴɪɴɢs ʟɪsᴛ</b>\n\nɴᴏ ᴜsᴇʀs ʜᴀᴠᴇ ᴡᴀʀɴɪɴɢs. ✨"
+    else:
+        text = f"📋 <b>ᴡᴀʀɴɪɴɢs ʟɪsᴛ</b> ({len(rows)})\n\n" + "\n".join(rows)
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=source_keyboard())
+    schedule_delete(sent)
+
+
+async def resetwarn_cmd(update, context):
+    state = state_of(context)
+    if not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent); return
+
+    target = _parse_target_id(update, context)
+    if target is None:
+        sent = await update.message.reply_text(
+            "♻️ <b>ᴜsᴀɢᴇ:</b>\n/resetwarn &lt;ᴜsᴇʀ_ɪᴅ&gt;\nᴏʀ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴜsᴇʀ ᴡɪᴛʜ /resetwarn",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent); return
+
+    uid_str = str(int(target))
+    if uid_str in state.users:
+        state.users[uid_str]["warnings"] = 0
+        state.persist()
+    sent = await update.message.reply_text(
+        f"♻️ <b>ʀᴇsᴇᴛ ᴡᴀʀɴɪɴɢs</b> ғᴏʀ <code>{target}</code>",
+        parse_mode="HTML",
+    )
+    schedule_delete(sent)
+
+
+async def banned_list(update, context):
+    state = state_of(context)
+    if not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ <b>ᴏᴡɴᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.</b>", parse_mode="HTML")
+        schedule_delete(sent); return
+
+    if not state.banned:
+        text = "📋 <b>ʙᴀɴɴᴇᴅ ʟɪsᴛ</b>\n\nɴᴏ ᴜsᴇʀs ᴀʀᴇ ʙᴀɴɴᴇᴅ. ✨"
+    else:
+        rows = "\n".join(f"• <code>{u}</code>" for u in sorted(state.banned))
+        text = f"📋 <b>ʙᴀɴɴᴇᴅ ʟɪsᴛ</b> ({len(state.banned)})\n\n{rows}"
+
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=source_keyboard())
+    schedule_delete(sent)
+
+
+# ════════════════════════════════════════════════════════════════════
+#                          CLONE FEATURE
+# ════════════════════════════════════════════════════════════════════
+
+async def _start_clone(state: BotState) -> Application:
+    """Build, initialize, start, and start polling for a clone bot."""
+    capp = build_application(state)
+    await capp.initialize()
+    await capp.start()
+    await capp.updater.start_polling(drop_pending_updates=True)
+    CLONE_APPS[state.token] = capp
+    CLONE_STATES[state.token] = state
+    return capp
+
+
+async def _stop_clone(token: str):
+    capp = CLONE_APPS.pop(token, None)
+    CLONE_STATES.pop(token, None)
+    if capp is not None:
+        try:
+            await capp.updater.stop()
+        except Exception:
+            pass
+        try:
+            await capp.stop()
+        except Exception:
+            pass
+        try:
+            await capp.shutdown()
+        except Exception:
+            pass
+
+
+# ──────── /clone (main bot only) ────────
+async def clone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await gate(update, context):
+        return
+    state = state_of(context)
+    if not state.is_main:
+        sent = await update.message.reply_text(
+            "⛔ ᴄʟᴏɴɪɴɢ ɪs ᴀᴠᴀɪʟᴀʙʟᴇ ᴏɴʟʏ ғʀᴏᴍ ᴛʜᴇ ᴍᴀɪɴ ʙᴏᴛ."
+        )
+        schedule_delete(sent)
+        return
+
+    if not context.args:
+        sent = await update.message.reply_text(
+            "🧬 <b>ᴄʟᴏɴᴇ ᴛʜɪs ʙᴏᴛ</b>\n\n"
+            "<b>ᴜsᴀɢᴇ:</b> <code>/clone &lt;ʙᴏᴛ_ᴛᴏᴋᴇɴ&gt;</code>\n\n"
+            "1️⃣ ɢᴇᴛ ᴀ ᴛᴏᴋᴇɴ ғʀᴏᴍ @BotFather\n"
+            "2️⃣ sᴇɴᴅ <code>/clone &lt;ʏᴏᴜʀ_ᴛᴏᴋᴇɴ&gt;</code> ʜᴇʀᴇ\n"
+            "3️⃣ ʏᴏᴜʀ ɴᴇᴡ ᴄʟᴏɴᴇ ɢᴏᴇs ʟɪᴠᴇ ɪɴsᴛᴀɴᴛʟʏ\n"
+            "4️⃣ ᴏᴘᴇɴ ʏᴏᴜʀ ᴄʟᴏɴᴇ ᴀɴᴅ sᴇɴᴅ <code>/setapi REMOVEBG_KEY IMGBB_KEY</code>\n\n"
+            "<b>ɢᴇᴛ ᴀᴘɪ ᴋᴇʏs:</b>\n"
+            f"• ʀᴇᴍᴏᴠᴇ.ʙɢ → {REMOVE_BG_HOWTO}\n"
+            f"• ɪᴍɢʙʙ → {IMGBB_HOWTO}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        schedule_delete(sent, 180)
+        return
+
+    token = context.args[0].strip()
+
+    if token in CLONE_APPS or token == BOT_TOKEN:
+        sent = await update.message.reply_text("⚠️ ᴛʜɪs ᴛᴏᴋᴇɴ ɪs ᴀʟʀᴇᴀᴅʏ ʀᴜɴɴɪɴɢ.")
+        schedule_delete(sent)
+        return
+
+    # Validate token
+    pending = await update.message.reply_text("🔍 ᴠᴀʟɪᴅᴀᴛɪɴɢ ᴛᴏᴋᴇɴ...")
+    try:
+        tmp_bot = Bot(token=token)
+        me = await tmp_bot.get_me()
+    except (InvalidToken, TelegramError) as e:
+        try:
+            await pending.edit_text(f"❌ ɪɴᴠᴀʟɪᴅ ᴛᴏᴋᴇɴ:\n<code>{e}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+        schedule_delete(pending)
+        return
+
+    cs = BotState(
+        token=token,
+        owner_id=update.effective_user.id,
+        is_main=False,
+        bot_username=me.username,
+    )
+
+    try:
+        await _start_clone(cs)
+    except Exception as e:
+        try:
+            await pending.edit_text(f"❌ ғᴀɪʟᴇᴅ ᴛᴏ sᴛᴀʀᴛ ᴄʟᴏɴᴇ:\n<code>{e}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+        schedule_delete(pending)
+        return
+
+    cs.persist()
+
+    msg = (
+        f"✅ <b>ᴄʟᴏɴᴇ ɪs ʟɪᴠᴇ!</b> @{me.username}\n\n"
+        "ɴᴏᴡ ᴏᴘᴇɴ ʏᴏᴜʀ ᴄʟᴏɴᴇ ᴀɴᴅ sᴇɴᴅ:\n"
+        "<code>/setapi REMOVEBG_KEY IMGBB_KEY</code>\n\n"
+        "<b>ɢᴇᴛ ᴀᴘɪ ᴋᴇʏs ʜᴇʀᴇ:</b>\n"
+        f"• ʀᴇᴍᴏᴠᴇ.ʙɢ → {REMOVE_BG_HOWTO}\n"
+        f"• ɪᴍɢʙʙ → {IMGBB_HOWTO}\n\n"
+        "<b>ᴄᴜsᴛᴏᴍɪᴢᴇ ʏᴏᴜʀ ᴄʟᴏɴᴇ:</b>\n"
+        "• <code>/setstart &lt;text&gt;</code> — ᴄᴜsᴛᴏᴍ sᴛᴀʀᴛ ᴄᴀᴘᴛɪᴏɴ\n"
+        "• <code>/setping &lt;text&gt;</code> — ᴄᴜsᴛᴏᴍ ᴘɪɴɢ ᴄᴀᴘᴛɪᴏɴ\n"
+        "• <code>/setbuttons &lt;join&gt; | &lt;network&gt; | &lt;home&gt;</code>\n"
+        "• <code>/setowner &lt;user_id&gt;</code> — ᴛʀᴀɴsғᴇʀ ᴏᴡɴᴇʀsʜɪᴘ\n\n"
+        "⚠️ <i>ᴜɴᴛɪʟ ᴀᴘɪ ᴋᴇʏs ᴀʀᴇ sᴇᴛ, ᴛʜᴇ ᴄʟᴏɴᴇ ᴄᴀɴ'ᴛ ᴘʀᴏᴄᴇss ɪᴍᴀɢᴇs.</i>"
+    )
+    try:
+        await pending.edit_text(msg, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception:
+        sent = await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
+        schedule_delete(sent, 300)
+    schedule_delete(pending, 300)
+
+    # Tell the master a new clone joined the network
+    if int(update.effective_user.id) != MASTER_OWNER_ID:
+        try:
+            await context.bot.send_message(
+                MASTER_OWNER_ID,
+                f"🧬 <b>ɴᴇᴡ ᴄʟᴏɴᴇ</b> ᴊᴏɪɴᴇᴅ ᴛʜᴇ ɴᴇᴛᴡᴏʀᴋ\n"
+                f"🤖 @{me.username}\n"
+                f"👤 ᴏᴡɴᴇʀ: <code>{update.effective_user.id}</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+# ──────── /clones — list all (master only) ────────
+async def clones_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if int(update.effective_user.id) != MASTER_OWNER_ID:
+        sent = await update.message.reply_text("⛔ ᴍᴀsᴛᴇʀ ᴏɴʟʏ.")
+        schedule_delete(sent); return
+    if not CLONE_STATES:
+        sent = await update.message.reply_text("📭 ɴᴏ ᴄʟᴏɴᴇs ʏᴇᴛ.")
+        schedule_delete(sent); return
+    rows = []
+    for cs in CLONE_STATES.values():
+        rows.append(
+            f"• @{cs.bot_username or '—'} · 👤 <code>{cs.owner_id}</code>"
+            f" · 👥 {len(cs.users)} · 🧠 {cs.removals} · 📤 {cs.uploads}"
+            f" · {'🟢' if cs.has_apis() else '⚙️'}"
+        )
+    text = f"🤖 <b>ᴄʟᴏɴᴇs ({len(CLONE_STATES)})</b>\n\n" + "\n".join(rows)
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=source_keyboard())
+    schedule_delete(sent, 180)
+
+
+# ──────── /clonestats — aggregate (master only) ────────
+async def clonestats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if int(update.effective_user.id) != MASTER_OWNER_ID:
+        sent = await update.message.reply_text("⛔ ᴍᴀsᴛᴇʀ ᴏɴʟʏ ᴄᴏᴍᴍᴀɴᴅ.")
+        schedule_delete(sent); return
+
+    if not CLONE_STATES:
+        sent = await update.message.reply_text(
+            "📭 <b>ɴᴏ ᴄʟᴏɴᴇs ʏᴇᴛ</b>\n\n"
+            "ᴀs sᴏᴏɴ ᴀs ᴘᴇᴏᴘʟᴇ ʀᴜɴ <code>/clone &lt;ᴛᴏᴋᴇɴ&gt;</code> "
+            "ᴏɴ ᴛʜᴇ ᴍᴀɪɴ ʙᴏᴛ, ᴛʜᴇɪʀ ɴᴜᴍʙᴇʀs ᴡɪʟʟ sʜᴏᴡ ᴜᴘ ʜᴇʀᴇ.",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent); return
+
+    total_clones = len(CLONE_STATES)
+    configured = sum(1 for s in CLONE_STATES.values() if s.has_apis())
+    total_users = sum(len(s.users) for s in CLONE_STATES.values())
+    total_uploads = sum(s.uploads for s in CLONE_STATES.values())
+    total_removals = sum(s.removals for s in CLONE_STATES.values())
+    total_refs = sum(
+        len(u.get("refs", []))
+        for s in CLONE_STATES.values() for u in s.users.values()
+    )
+
+    # Top 5 by combined activity
+    ranked = sorted(
+        CLONE_STATES.values(),
+        key=lambda s: (len(s.users), s.uploads + s.removals),
+        reverse=True,
+    )[:5]
+    top_lines = []
+    for i, s in enumerate(ranked, 1):
+        uname = s.bot_username or "—"
+        top_lines.append(
+            f"{i}. @{uname} — 👥 {len(s.users)} · 🧠 {s.removals} · 📤 {s.uploads}"
+        )
+
+    # Main bot + clones grand totals
+    main_users = len(MAIN_STATE.users)
+    grand_users = main_users + total_users
+    grand_uploads = MAIN_STATE.uploads + total_uploads
+    grand_removals = MAIN_STATE.removals + total_removals
+
+    text = (
+        "🌐 <b>ᴍᴀᴅᴀʀᴀ ɴᴇᴛᴡᴏʀᴋ — ᴄʟᴏɴᴇ sᴛᴀᴛs</b>\n\n"
+        f"🤖 ᴀᴄᴛɪᴠᴇ ᴄʟᴏɴᴇs : <b>{total_clones}</b>\n"
+        f"🟢 ғᴜʟʟʏ ᴄᴏɴғɪɢᴜʀᴇᴅ : <b>{configured}/{total_clones}</b>\n"
+        f"👥 ᴄʟᴏɴᴇ ᴜsᴇʀs : <b>{total_users}</b>\n"
+        f"🧠 ʙɢ ʀᴇᴍᴏᴠᴀʟs (ᴄʟᴏɴᴇs) : <b>{total_removals}</b>\n"
+        f"📤 ɪᴍᴀɢᴇ ᴜᴘʟᴏᴀᴅs (ᴄʟᴏɴᴇs) : <b>{total_uploads}</b>\n"
+        f"🔗 ᴄʟᴏɴᴇ ʀᴇғᴇʀʀᴀʟs : <b>{total_refs}</b>\n\n"
+        "🏆 <b>ᴛᴏᴘ ᴄʟᴏɴᴇs</b>\n"
+        + ("\n".join(top_lines) if top_lines else "—")
+        + "\n\n"
+        "🌟 <b>ɢʀᴀɴᴅ ᴛᴏᴛᴀʟs (ᴍᴀɪɴ + ᴀʟʟ ᴄʟᴏɴᴇs)</b>\n"
+        f"👥 ᴜsᴇʀs : <b>{grand_users}</b>\n"
+        f"🧠 ʀᴇᴍᴏᴠᴀʟs : <b>{grand_removals}</b>\n"
+        f"📤 ᴜᴘʟᴏᴀᴅs : <b>{grand_uploads}</b>"
+    )
+
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=source_keyboard())
+    schedule_delete(sent, 300)
+
+
+# ──────── Clone-side configuration commands ────────
+async def setapi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = state_of(context)
+    if state.is_main:
+        sent = await update.message.reply_text("ℹ️ ᴀᴘɪ ᴋᴇʏs ᴏɴ ᴛʜᴇ ᴍᴀɪɴ ʙᴏᴛ ᴀʀᴇ ᴍᴀɴᴀɢᴇᴅ ʙʏ ᴛʜᴇ ᴍᴀsᴛᴇʀ.")
+        schedule_delete(sent); return
+    if not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ ᴄʟᴏɴᴇ ᴏᴡɴᴇʀ ᴏɴʟʏ.")
+        schedule_delete(sent); return
+    if len(context.args) < 2:
+        sent = await update.message.reply_text(
+            "🔑 <b>ᴜsᴀɢᴇ:</b>\n<code>/setapi &lt;REMOVEBG_KEY&gt; &lt;IMGBB_KEY&gt;</code>\n\n"
+            "<b>ᴡʜᴇʀᴇ ᴛᴏ ɢᴇᴛ ᴋᴇʏs:</b>\n"
+            f"• ʀᴇᴍᴏᴠᴇ.ʙɢ → {REMOVE_BG_HOWTO}\n"
+            f"• ɪᴍɢʙʙ → {IMGBB_HOWTO}\n\n"
+            "1️⃣ ʀᴇɢɪsᴛᴇʀ ᴀᴛ ᴇᴀᴄʜ sɪᴛᴇ\n"
+            "2️⃣ ᴄᴏᴘʏ ʏᴏᴜʀ ᴀᴘɪ ᴋᴇʏ\n"
+            "3️⃣ ʀᴜɴ ᴛʜᴇ ᴄᴏᴍᴍᴀɴᴅ ᴀʙᴏᴠᴇ ᴡɪᴛʜ ʙᴏᴛʜ ᴋᴇʏs",
+            parse_mode="HTML", disable_web_page_preview=True,
+        )
+        schedule_delete(sent, 180); return
+
+    state.remove_bg_api = context.args[0].strip()
+    state.imgbb_api = context.args[1].strip()
+    state.persist()
+
+    # Try to scrub the message containing the keys for safety
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    sent = await update.message.reply_text(
+        "✅ <b>ᴀᴘɪ ᴋᴇʏs sᴀᴠᴇᴅ</b>\n"
+        "ʏᴏᴜʀ ᴄʟᴏɴᴇ ɪs ɴᴏᴡ ᴀᴄᴛɪᴠᴇ. sᴇɴᴅ ᴀ ᴘʜᴏᴛᴏ ᴛᴏ ᴛᴇsᴛ! 🎉\n\n"
+        "<i>(ʏᴏᴜʀ ᴋᴇʏs ᴀʀᴇ sᴛᴏʀᴇᴅ ʟᴏᴄᴀʟʟʏ ᴀɴᴅ ɴᴇᴠᴇʀ sʜᴏᴡɴ ᴛᴏ ᴜsᴇʀs.)</i>",
+        parse_mode="HTML",
+    )
+    schedule_delete(sent, 120)
+
+
+async def setstart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = state_of(context)
+    if state.is_main or not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ ᴄʟᴏɴᴇ ᴏᴡɴᴇʀ ᴏɴʟʏ.")
+        schedule_delete(sent); return
+    text = (update.message.text or "").partition(" ")[2].strip()
+    if not text:
+        sent = await update.message.reply_text(
+            "📝 <b>ᴜsᴀɢᴇ:</b> <code>/setstart &lt;ᴛᴇxᴛ&gt;</code>\n\n"
+            "ᴘʟᴀᴄᴇʜᴏʟᴅᴇʀs ʏᴏᴜ ᴄᴀɴ ᴜsᴇ:\n"
+            "• <code>{name}</code> — ᴜsᴇʀ's ғɪʀsᴛ ɴᴀᴍᴇ\n"
+            "• <code>{bot}</code> — ʙᴏᴛ's ɴᴀᴍᴇ\n\n"
+            "ʜᴛᴍʟ ᴛᴀɢs (&lt;b&gt;, &lt;i&gt;, &lt;code&gt;) ᴀʀᴇ ᴀʟʟᴏᴡᴇᴅ.",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent, 120); return
+    state.start_text = text
+    state.persist()
+    sent = await update.message.reply_text("✅ sᴛᴀʀᴛ ᴄᴀᴘᴛɪᴏɴ ᴜᴘᴅᴀᴛᴇᴅ.")
+    schedule_delete(sent)
+
+
+async def setping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = state_of(context)
+    if state.is_main or not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ ᴄʟᴏɴᴇ ᴏᴡɴᴇʀ ᴏɴʟʏ.")
+        schedule_delete(sent); return
+    text = (update.message.text or "").partition(" ")[2].strip()
+    if not text:
+        sent = await update.message.reply_text(
+            "🏓 <b>ᴜsᴀɢᴇ:</b> <code>/setping &lt;ᴛᴇxᴛ&gt;</code>\n\n"
+            "ᴘʟᴀᴄᴇʜᴏʟᴅᴇʀs:\n"
+            "• <code>{ping}</code> — ʟᴀᴛᴇɴᴄʏ ᴍs\n"
+            "• <code>{uptime}</code> — ʙᴏᴛ ᴜᴘᴛɪᴍᴇ\n"
+            "• <code>{ram}</code> <code>{cpu}</code> <code>{disk}</code> — sʏsᴛᴇᴍ %\n"
+            "• <code>{bot}</code> — ʙᴏᴛ's ɴᴀᴍᴇ",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent, 120); return
+    state.ping_text = text
+    state.persist()
+    sent = await update.message.reply_text("✅ ᴘɪɴɢ ᴄᴀᴘᴛɪᴏɴ ᴜᴘᴅᴀᴛᴇᴅ.")
+    schedule_delete(sent)
+
+
+async def setbuttons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = state_of(context)
+    if state.is_main or not state.is_owner(update.effective_user.id):
+        sent = await update.message.reply_text("⛔ ᴄʟᴏɴᴇ ᴏᴡɴᴇʀ ᴏɴʟʏ.")
+        schedule_delete(sent); return
+    raw = (update.message.text or "").partition(" ")[2].strip()
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) != 3 or not all(parts):
+        sent = await update.message.reply_text(
+            "🎛 <b>ᴜsᴀɢᴇ:</b>\n"
+            "<code>/setbuttons &lt;ᴊᴏɪɴ_ᴜʀʟ&gt; | &lt;ɴᴇᴛᴡᴏʀᴋ_ᴜʀʟ&gt; | &lt;ʜᴏᴍᴇ_ᴜʀʟ&gt;</code>\n\n"
+            "ᴇxᴀᴍᴘʟᴇ:\n"
+            "<code>/setbuttons https://t.me/mygroup | https://t.me/mychannel | https://t.me/me</code>",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent, 120); return
+    state.join_url, state.network_url, state.home_url = parts
+    state.persist()
+    sent = await update.message.reply_text(
+        "✅ ʙᴜᴛᴛᴏɴs ᴜᴘᴅᴀᴛᴇᴅ.\n"
+        f"🌟 ᴊᴏɪɴ: {state.join_url}\n"
+        f"🌐 ɴᴇᴛᴡᴏʀᴋ: {state.network_url}\n"
+        f"🏠 ʜᴏᴍᴇ: {state.home_url}",
+        disable_web_page_preview=True,
+    )
+    schedule_delete(sent, 120)
+
+
+async def setowner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = state_of(context)
+    # Current clone owner OR master can transfer
+    is_caller_master = int(update.effective_user.id) == MASTER_OWNER_ID
+    if state.is_main or not (state.is_owner(update.effective_user.id) or is_caller_master):
+        sent = await update.message.reply_text("⛔ ᴄʟᴏɴᴇ ᴏᴡɴᴇʀ ᴏɴʟʏ.")
+        schedule_delete(sent); return
+    if not context.args:
+        sent = await update.message.reply_text(
+            "👑 <b>ᴜsᴀɢᴇ:</b> <code>/setowner &lt;ᴜsᴇʀ_ɪᴅ&gt;</code>",
+            parse_mode="HTML",
+        )
+        schedule_delete(sent); return
+    try:
+        new_owner = int(context.args[0])
+    except ValueError:
+        sent = await update.message.reply_text("❌ ɪɴᴠᴀʟɪᴅ ɪᴅ.")
+        schedule_delete(sent); return
+    state.owner_id = new_owner
+    state.persist()
+    sent = await update.message.reply_text(
+        f"✅ ɴᴇᴡ ᴄʟᴏɴᴇ ᴏᴡɴᴇʀ: <code>{new_owner}</code>",
+        parse_mode="HTML",
+    )
+    schedule_delete(sent)
+
+
+# ════════════════════════════════════════════════════════════════════
+#                       APPLICATION BUILDER
+# ════════════════════════════════════════════════════════════════════
+
+def build_application(state: BotState) -> Application:
+    app = ApplicationBuilder().token(state.token).build()
+    app.bot_data["state"] = state
+
+    # Common handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("id", id_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("setgroup", setgroup))
+    app.add_handler(CommandHandler("ban", ban))
+    app.add_handler(CommandHandler("unban", unban))
+    app.add_handler(CommandHandler("banned", banned_list))
+    app.add_handler(CommandHandler("warnings", warnings_cmd))
+    app.add_handler(CommandHandler("resetwarn", resetwarn_cmd))
+
+    # Main-only commands
+    if state.is_main:
+        app.add_handler(CommandHandler("clone", clone_cmd))
+        app.add_handler(CommandHandler("clones", clones_list_cmd))
+        app.add_handler(CommandHandler("clonestats", clonestats_cmd))
+
+    # Clone-only configuration commands
+    if not state.is_main:
+        app.add_handler(CommandHandler("setapi", setapi_cmd))
+        app.add_handler(CommandHandler("setstart", setstart_cmd))
+        app.add_handler(CommandHandler("setping", setping_cmd))
+        app.add_handler(CommandHandler("setbuttons", setbuttons_cmd))
+        app.add_handler(CommandHandler("setowner", setowner_cmd))
+
+    app.add_handler(CallbackQueryHandler(ref, pattern="^ref$"))
+    app.add_handler(CallbackQueryHandler(help_cb, pattern="^help$"))
+    app.add_handler(CallbackQueryHandler(set_mode, pattern="^(remove|upload)$"))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    return app
+
+
+# ════════════════════════════════════════════════════════════════════
+#                              MAIN
+# ════════════════════════════════════════════════════════════════════
+
+async def run_all_bots():
+    main_app = build_application(MAIN_STATE)
+    await main_app.initialize()
+    await main_app.start()
+    await main_app.updater.start_polling(drop_pending_updates=False)
+
+    try:
+        me = await main_app.bot.get_me()
+        MAIN_STATE.bot_username = me.username
+        print(f"🚀 Main bot online: @{me.username}")
+    except Exception:
+        pass
+
+    # Restore previously-registered clones from disk
+    for token, raw in list(CLONES_REGISTRY.items()):
+        try:
+            cs = BotState.from_dict(token, raw)
+            await _start_clone(cs)
+            print(f"🤖 Clone restored: @{cs.bot_username or '?'}")
+        except Exception as e:
+            print(f"❌ Failed to restore clone {token[:10]}…: {e}")
+
+    print(f"✅ Network up — main + {len(CLONE_APPS)} clone(s)")
+
+    stop_event = asyncio.Event()
+    try:
+        await stop_event.wait()
+    finally:
+        for app in [main_app, *list(CLONE_APPS.values())]:
+            try:
+                await app.updater.stop()
+            except Exception:
+                pass
+            try:
+                await app.stop()
+            except Exception:
+                pass
+            try:
+                await app.shutdown()
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    try:
+        print("🚀 Bot starting...")
+        asyncio.run(run_all_bots())
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    except Exception:
+        import traceback
+        print("❌ FULL ERROR:")
+        traceback.print_exc()
